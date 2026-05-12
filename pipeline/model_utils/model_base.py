@@ -6,9 +6,10 @@ from jaxtyping import Int, Float
 from pipeline.utils.hook_utils import add_hooks
 
 class ModelBase(ABC):
-    def __init__(self, model_name_or_path: str):
+    #added kwargs for loading the model in 4bit
+    def __init__(self, model_name_or_path: str, **kwargs):
         self.model_name_or_path = model_name_or_path
-        self.model: AutoModelForCausalLM = self._load_model(model_name_or_path)
+        self.model: AutoModelForCausalLM = self._load_model(model_name_or_path, **kwargs)
         self.tokenizer: AutoTokenizer = self._load_tokenizer(model_name_or_path)
         
         self.tokenize_instructions_fn = self._get_tokenize_instructions_fn()
@@ -25,7 +26,7 @@ class ModelBase(ABC):
             del self.model
 
     @abstractmethod
-    def _load_model(self, model_name_or_path: str) -> AutoModelForCausalLM:
+    def _load_model(self, model_name_or_path: str, **kwargs) -> AutoModelForCausalLM:
         pass
 
     @abstractmethod
