@@ -52,14 +52,14 @@ def get_mean_diff(model, tokenizer, unanswerable_instructions, answerable_instru
 
     return mean_diff
 
-def generate_directions(model_base: ModelBase, unanswerable_instructions, answerable_instructions, artifact_dir, batch_size=32, positions = [1]):
+def generate_directions(model_base: ModelBase, unanswerable_instructions, answerable_instructions, artifact_dir, batch_size=32, positions = [1], layers = None):
     if not os.path.exists(artifact_dir):
         os.makedirs(artifact_dir)
 
     if positions == [1]:
         positions = list(range(-len(model_base.eoi_toks), 0))
 
-    mean_diffs = get_mean_diff(model_base.model, model_base.tokenizer, unanswerable_instructions, answerable_instructions, model_base.tokenize_instructions_fn, model_base.model_block_modules, batch_size=batch_size, positions=positions)
+    mean_diffs = get_mean_diff(model_base.model, model_base.tokenizer, unanswerable_instructions, answerable_instructions, model_base.tokenize_instructions_fn, model_base.model_block_modules, batch_size=batch_size, positions=positions, layers = layers)
 
     assert mean_diffs.shape == (len(positions), model_base.model.config.num_hidden_layers, model_base.model.config.hidden_size)
     assert not mean_diffs.isnan().any()
