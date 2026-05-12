@@ -1,38 +1,58 @@
 import torch
+import functools
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from typing import List
 from torch import Tensor
 from jaxtyping import Float
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+import numpy as np
+
 from pipeline.model_utils.model_base import ModelBase
+
+# Qwen3 (Im-style) template focused on classification
+QWEN3_CHAT_TEMPLATE = """<|im_start|>user
+{instruction}<|im_end|>
+<|im_start|>assistant
+"""
+
+# The instruction we will inject to force binary classification
+# Updated to use the single-token 'multiple'
+ENUM_PROMPT_PREFIX = "Does the following question have multiple possible answers? Answer with exactly one word: 'multiple' if yes, 'singular' if no.\n\nQuestion: "
+
+# Using your verified ID for 'multiple'
+QWEN3_ENUMERABILITY_TOKS = [35673]
+
+def format_instruction_qwen3(instruction: str):
+    # We wrap the question with our classification command
+    full_instruction = ENUM_PROMPT_PREFIX + instruction
+    return QWEN3_CHAT_TEMPLATE.format(instruction=full_instruction)
+
+def tokenize_instructions_qwen3(tokenizer: AutoTokenizer, instructions: List[str]):
+    prompts = [format_instruction_qwen3(instr) for instr in instructions]
+    return tokenizer(prompts, padding=True, truncation=True, max_length=256, return_tensors="pt")
 
 class Qwen3Model(ModelBase):
     def __init__(self, model_name_or_path: str, **kwargs):
         super().__init__(model_name_or_path, **kwargs)
 
     def _load_model(self, model_name_or_path: str, **kwargs) -> AutoModelForCausalLM:
-        """
-        Loads the model using BitsAndBytesConfig to avoid TypeError.
-        """
-        # 1. Handle quantization explicitly
+        # Handle quantization config explicitly as we discussed for OOM
         if kwargs.get('load_in_4bit'):
-            quantization_config = BitsAndBytesConfig(
+            kwargs['quantization_config'] = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
             )
-            kwargs['quantization_config'] = quantization_config
-            # Remove the raw flag so from_pretrained doesn't try to pass it to the model
-            kwargs.pop('load_in_4bit') 
-        
-        # 2. Clean up any other non-HF arguments if they exist
-        kwargs.pop('enable_thinking', None)
+            kwargs.pop('load_in_4bit')
 
-        return AutoModelForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             torch_dtype=torch.bfloat16,
             device_map="auto",
-            **kwargs # Now contains quantization_config instead of load_in_4bit
-        )
+            **kwargs
+        ).eval()
+        model.requires_grad_(False)
+        return model
 
     def _load_tokenizer(self, model_name_or_path: str) -> AutoTokenizer:
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
@@ -41,37 +61,29 @@ class Qwen3Model(ModelBase):
         return tokenizer
 
     def _get_tokenize_instructions_fn(self):
-        def tokenize_instructions(instructions):
-            prompts = [
-                self.tokenizer.apply_chat_template(
-                    [{"role": "user", "content": instr}], 
-                    tokenize=False, 
-                    add_generation_prompt=True
-                ) for instr in instructions
-            ]
-            return self.tokenizer(prompts, padding=True, return_tensors="pt")
-        return tokenize_instructions
+        return functools.partial(tokenize_instructions_qwen3, tokenizer=self.tokenizer)
 
     def _get_eoi_toks(self):
-        # Targets the end of the assistant header in Qwen3
-        return [self.tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)[-1]]
+        # This targets the newline after assistant header
+        return self.tokenizer.encode("\n", add_special_tokens=False)
 
     def _get_thresholds(self):
-        return {"default": 0.5}
+        return [float(x) for x in np.arange(-1, 1.1, 0.1)]
 
     def _get_unanswerability_toks(self):
-        return self.tokenizer.encode("I cannot answer", add_special_tokens=False)
+        return QWEN3_ENUMERABILITY_TOKS
 
     def _get_model_block_modules(self):
         return self.model.model.layers
 
     def _get_attn_modules(self):
-        return [layer.self_attn for layer in self.model.model.layers]
+        return torch.nn.ModuleList([block.self_attn for block in self.model.model.layers])
 
     def _get_mlp_modules(self):
-        return [layer.mlp for layer in self.model.model.layers]
+        return torch.nn.ModuleList([block.mlp for block in self.model.model.layers])
 
-    def _get_act_add_mod_fn(self, direction, coeff, layer):
+    def _get_act_add_mod_fn(self, direction: Float[Tensor, "d_model"], coeff, layer):
+        """Standard hook logic for activation steering."""
         def hook(module, input, output):
             h = output[0]
             h += coeff * direction.to(h.device)
