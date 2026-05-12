@@ -1,24 +1,37 @@
 import torch
 from torch import Tensor
 from jaxtyping import Float
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from pipeline.model_utils.model_base import ModelBase
 
 class Qwen3Model(ModelBase):
     def __init__(self, model_name_or_path: str, **kwargs):
-        # Pass everything to ModelBase.__init__
         super().__init__(model_name_or_path, **kwargs)
 
     def _load_model(self, model_name_or_path: str, **kwargs) -> AutoModelForCausalLM:
-        """Loads model with support for 4-bit quantization and bfloat16."""
-        # Separate 'enable_thinking' if it's not a standard HF argument
-        kwargs.pop('enable_thinking', None) 
+        """
+        Loads the model using BitsAndBytesConfig to avoid TypeError.
+        """
+        # 1. Handle quantization explicitly
+        if kwargs.get('load_in_4bit'):
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            )
+            kwargs['quantization_config'] = quantization_config
+            # Remove the raw flag so from_pretrained doesn't try to pass it to the model
+            kwargs.pop('load_in_4bit') 
         
+        # 2. Clean up any other non-HF arguments if they exist
+        kwargs.pop('enable_thinking', None)
+
         return AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             torch_dtype=torch.bfloat16,
             device_map="auto",
-            **kwargs # This now contains load_in_4bit=True
+            **kwargs # Now contains quantization_config instead of load_in_4bit
         )
 
     def _load_tokenizer(self, model_name_or_path: str) -> AutoTokenizer:
